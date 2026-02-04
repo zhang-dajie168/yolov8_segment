@@ -1,44 +1,39 @@
 
 # 1.build
-colcon build --packages-select yolov8_detect_tracking
+colcon build --packages-select yolov8_segment
 
 # 2. run
- source install/setup.bash
- ros2 launch yolov8_detect_tracking yolov8_detect_tracking.launch.py 
+source install/setup.bash
+
+ros2 launch yolov8_segment yolov8_segment.launch.py 
+
  
  
 # 3. echo
 
-ros2 topic echo /keypoint_tracks
+ros2 topic echo /segmentation/rectangles
 
 
 # 4.result
 
 header:
   stamp:
-    sec: 1764656961
-    nanosec: 514896896
-  frame_id: camera_link
+    sec: 1768382654
+    nanosec: 232261888
+  frame_id: class_0_score_0.82
 polygon:
   points:
-  - x: 1.0
-    y: 1.0
-    z: 2.0
-  - x: 309.0
-    y: 73.0
+  - x: 531.0
+    y: 394.0
     z: 0.0
-  - x: 639.0
-    y: 471.0
+  - x: 102.0
+    y: 349.0
     z: 0.0
+  - x: 105.0
+    y: 316.0
+    z: 0.0
+  - x: 535.0
+    y: 361.0
+    z: 0.0
+---
 
-
-
-# 跟踪找回逻辑：
-
-目标跟踪中
-    ↓ (目标消失)
-目标丢失 → 启动主动找回
-    ↓ (搜索候选目标)
-ReID匹配 → 相似度≥阈值 → 匹配成功 → 身份切换 → 恢复跟踪
-    ↓ (匹配失败)          ↓ (验证失败)
-保持丢失状态 ←────── 目标重现 → ReID验证 → 验证成功 → 恢复跟踪
