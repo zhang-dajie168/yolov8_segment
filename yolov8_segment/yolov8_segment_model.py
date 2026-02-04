@@ -362,50 +362,81 @@ def draw_detection(img: np.array,
     cv2.putText(img, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
 
-def filter_mask_and_get_min_rectangle(mask_points, x1_corp, y1_corp, 
-                                     x_min_ratio=1/6, x_max_ratio=5/6,
-                                     original_width_160=160):
+def compute_and_process_mask(protos, mc, bbox, corp, 
+                           x_min_ratio=1/6, x_max_ratio=5/6,
+                           original_h=None, original_w=None):
     """
-    过滤掩码点并计算最小外接矩形
+    计算掩码并进行处理，返回过滤后的点和最小矩形
     
     Args:
-        mask_points: 掩码点坐标，形状为(N, 2)，每个元素是[y, x]
-        x1_corp: crop区域的x起始坐标
-        y1_corp: crop区域的y起始坐标
+        protos: 160x160的protos特征图
+        mc: mask coefficients
+        bbox: 原始图像坐标系中的边界框 (x1, y1, x2, y2)
+        corp: 160x160坐标系中的crop区域 (x1_corp, y1_corp, x2_corp, y2_corp)
         x_min_ratio: x坐标最小比例阈值
         x_max_ratio: x坐标最大比例阈值
-        original_width_160: 原始宽度（160坐标系）
+        original_h: 原始图像高度
+        original_w: 原始图像宽度
         
     Returns:
-        tuple: (filtered_points, box_points_original) 或 (None, None)
+        tuple: (filtered_points, box_points_original, mask_points) 或 (None, None, None)
     """
+    x1_corp, y1_corp, x2_corp, y2_corp = corp
+    x1, y1, x2, y2 = bbox
+    
+    # 确保边界不越界
+    x1_corp = max(0, x1_corp)
+    y1_corp = max(0, y1_corp)
+    x2_corp = min(160, x2_corp)
+    y2_corp = min(160, y2_corp)
+    
+    if x2_corp <= x1_corp or y2_corp <= y1_corp:
+        return None, None, None
+    
+    # 计算mask（在160x160坐标系中）
+    mask_region = protos[y1_corp:y2_corp, x1_corp:x2_corp, :]
+    mask = (np.sum(mc[np.newaxis, np.newaxis, :] * mask_region, axis=2) > 0.0).astype(np.int32)
+    
+    # 获取掩码点的坐标
+    mask_points = np.argwhere(mask == 1)  # 形状为 (N, 2)，每个元素是[y, x]
+    
     if len(mask_points) == 0:
-        return None, None
+        return None, None, None
     
-    # 将坐标转换回原始坐标系统（160x160 -> 原始尺寸）
-    mask_points_original = mask_points.copy()
-    mask_points_original[:, 0] = mask_points[:, 0] + y1_corp  # y坐标
-    mask_points_original[:, 1] = mask_points[:, 1] + x1_corp  # x坐标
-    
-    # 进一步过滤：只保留x坐标在原始宽度指定比例之间的点
+    # 计算在160x160坐标系中的过滤阈值
+    # 注意：这里的过滤是在160x160坐标系中进行的
+    original_width_160 = 160
     x_min_threshold = int(original_width_160 * x_min_ratio)
     x_max_threshold = int(original_width_160 * x_max_ratio)
     
-    filtered_points = []
-    for point in mask_points_original:
-        x, y = point[1], point[0]  # point是[y, x]格式
-        if x_min_threshold <= x <= x_max_threshold:
-            filtered_points.append([x, y])  # 转换为[x, y]格式用于OpenCV
+    # 过滤点在160x160坐标系中的位置
+    filtered_points_160 = []
+    for point in mask_points:
+        y_local, x_local = point  # 在crop区域内的坐标
+        x_160 = x_local + x1_corp  # 转换到160x160坐标系
+        y_160 = y_local + y1_corp
+        
+        if x_min_threshold <= x_160 <= x_max_threshold:
+            # 转换到原始图像坐标系
+            if original_h is not None and original_w is not None:
+                x_original = int(x_160 * original_w / 160.0)
+                y_original = int(y_160 * original_h / 160.0)
+            else:
+                # 使用bbox的缩放比例
+                x_original = int(x1 + x_local * (x2 - x1) / (x2_corp - x1_corp))
+                y_original = int(y1 + y_local * (y2 - y1) / (y2_corp - y1_corp))
+            
+            filtered_points_160.append([x_original, y_original])
     
     # 如果有足够的点，计算最小外接矩形
-    if len(filtered_points) >= 4:  # 至少需要4个点才能形成有意义的矩形
-        filtered_points_np = np.array(filtered_points, dtype=np.int32)
+    if len(filtered_points_160) >= 4:
+        filtered_points_np = np.array(filtered_points_160, dtype=np.int32)
         
         # 计算最小外接矩形
         rect = cv2.minAreaRect(filtered_points_np)
         box_points = cv2.boxPoints(rect)  # 获取矩形的四个顶点
         box_points = np.int32(box_points)  # 转换为整数
         
-        return filtered_points, box_points
+        return filtered_points_160, box_points, mask_points
     
-    return None, None
+    return None, None, mask_points
