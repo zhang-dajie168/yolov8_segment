@@ -376,12 +376,12 @@ class YOLOv8SegROSNode(Node):
                               np.array_equal(target_info['box_points'], target_to_publish['box_points']))
                 self.draw_min_rectangle_fast(display_image, target_info['box_points'], is_selected)
                 
-                # 在掩码图像上绘制点
-                if mask_image is not None and target_info.get('filtered_points'):
-                    color = rdk_colors[target_info['class_id'] % len(rdk_colors)]
-                    # 批量绘制点
-                    for x, y in target_info['filtered_points']:
-                        mask_image[y, x] = color
+                # # 在掩码图像上绘制点
+                # if mask_image is not None and target_info.get('filtered_points'):
+                #     color = rdk_colors[target_info['class_id'] % len(rdk_colors)]
+                #     # 批量绘制点
+                #     for x, y in target_info['filtered_points']:
+                #         mask_image[y, x] = color
             
             # 发布选中的目标矩形
             if target_to_publish is not None:

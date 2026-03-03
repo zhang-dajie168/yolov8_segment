@@ -64,19 +64,19 @@ class BaseModel:
         nv12[:height * width] = y
         nv12[height * width:] = uv_packed
 
-        logger.debug("\033[1;31m" + f"bgr8 to nv12 time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
+        # logger.debug("\033[1;31m" + f"bgr8 to nv12 time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
         return nv12
 
     def forward(self, input_tensor: np.array) -> list[dnn.pyDNNTensor]:
         begin_time = time()
         quantize_outputs = self.quantize_model[0].forward(input_tensor)
-        logger.debug("\033[1;31m" + f"forward time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
+        # logger.debug("\033[1;31m" + f"forward time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
         return quantize_outputs
 
     def c2numpy(self, outputs) -> list[np.array]:
         begin_time = time()
         outputs = [dnnTensor.buffer for dnnTensor in outputs]
-        logger.debug("\033[1;31m" + f"c to numpy time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
+        # logger.debug("\033[1;31m" + f"c to numpy time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
         return outputs
 
 
@@ -317,7 +317,7 @@ class YOLOv8_Seg(BaseModel):
             bboxes, scores, ids, corpes, mces = np.zeros((0, 4)), np.zeros((0,)), np.zeros(
                 (0,), dtype=np.int32), np.zeros((0, 4)), np.zeros((0, 32))
 
-        logger.debug("\033[1;31m" + f"Post Process time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
+        # logger.debug("\033[1;31m" + f"Post Process time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
 
         return ids, scores, bboxes, corpes, mces, protos
 
