@@ -1,7 +1,7 @@
 YOLOv8SegROSNode:
   ros__parameters:
     # YOLO模型参数
-    model_path: "/home/sunrise/Ebike_Human_Follower/src/yolov8_segment/models/yolov8n_instance_seg_bayese_640x640_nv12_modified3.0.bin"
+    model_path: "/home/sunrise/Ebike_Human_Follower/src/yolov8_segment/models/yolov8n_instance_seg_bayese_640x640_nv12_modified4.0.bin"
     conf_threshold: 0.3
     kpt_conf_threshold: 0.3
 
