@@ -9,34 +9,32 @@ from hobot_dnn import pyeasy_dnn as dnn
 from time import time
 import logging
 
-# 日志模块配置
 logging.basicConfig(
     level=logging.DEBUG,
-    format='[%(name)s] [%(asctime)s.%(msecs)03d] [%(levelname)s] %(message)s',
+    format='[%(name)s] [%(asctime)s] [%(levelname)s] %(message)s',
     datefmt='%H:%M:%S')
 logger = logging.getLogger("RDK_YOLO_SEG_MODEL")
 
 
 class BaseModel:
     def __init__(self, model_file: str) -> None:
-        # 加载BPU的bin模型, 打印相关参数
         try:
             begin_time = time()
             self.quantize_model = dnn.load(model_file)
-            logger.debug("\033[1;31m" + "Load D-Robotics Quantize model time = %.2f ms" % (
-                1000 * (time() - begin_time)) + "\033[0m")
+            logger.debug("Load D-Robotics Quantize model time = %.2f ms" % (
+                1000 * (time() - begin_time)))
         except Exception as e:
             logger.error("❌ Failed to load model file: %s" % (model_file))
             logger.error("You can download the model file from the following docs: ./models/download.md")
             logger.error(e)
             exit(1)
 
-        logger.info("\033[1;32m" + "-> input tensors" + "\033[0m")
+        logger.info("-> input tensors")
         for i, quantize_input in enumerate(self.quantize_model[0].inputs):
             logger.info(
                 f"intput[{i}], name={quantize_input.name}, type={quantize_input.properties.dtype}, shape={quantize_input.properties.shape}")
 
-        logger.info("\033[1;32m" + "-> output tensors" + "\033[0m")
+        logger.info("-> output tensors")
         for i, quantize_input in enumerate(self.quantize_model[0].outputs):
             logger.info(
                 f"output[{i}], name={quantize_input.name}, type={quantize_input.properties.dtype}, shape={quantize_input.properties.shape}")
@@ -49,9 +47,6 @@ class BaseModel:
         return cv2.resize(img, (self.model_input_height, self.model_input_weight), interpolation=cv2.INTER_LINEAR)
 
     def bgr2nv12(self, bgr_img: np.ndarray) -> np.ndarray:
-        """
-        Convert a BGR image to the NV12 format.
-        """
         begin_time = time()
         bgr_img = self.resizer(bgr_img)
         height, width = bgr_img.shape[0], bgr_img.shape[1]
@@ -63,20 +58,84 @@ class BaseModel:
         nv12 = np.zeros_like(yuv420p)
         nv12[:height * width] = y
         nv12[height * width:] = uv_packed
-
-        # logger.debug("\033[1;31m" + f"bgr8 to nv12 time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
         return nv12
 
-    def forward(self, input_tensor: np.array) -> list[dnn.pyDNNTensor]:
+    def nv12_resize(self, nv12_img: np.ndarray) -> np.ndarray:
+        """
+        对 NV12 图像做 resize，输出目标尺寸的 NV12。
+
+        输入 nv12_img 形状: (h * 3 // 2, w)，其中:
+          - 前 h 行是 Y 平面
+          - 后 h//2 行是 UV 交错平面（每行有 w//2 个 UV 对）
+
+        正确做法：分别提取 Y、U、V 平面，各自 resize，然后重新组装 NV12。
+        """
+        total_rows = nv12_img.shape[0]
+        w = nv12_img.shape[1]
+        h = total_rows * 2 // 3
+
+        # 提取 Y 平面 (h, w)
+        y_plane = nv12_img[:h, :]
+
+        # 提取 UV 平面 (h//2, w)，每行是 UV 交错
+        uv_interleaved = nv12_img[h:, :]  # (h//2, w)
+
+        # 分离 U 和 V：reshape 成 (h//2, w//2, 2)，然后取 [:,:,0] 和 [:,:,1]
+        uv_pairs = uv_interleaved.reshape(h // 2, w // 2, 2)
+        u_plane = uv_pairs[:, :, 0]  # (h//2, w//2)
+        v_plane = uv_pairs[:, :, 1]  # (h//2, w//2)
+
+        th, tw = self.model_input_height, self.model_input_weight
+
+        # resize Y 平面到 (th, tw)
+        y_resized = cv2.resize(y_plane, (tw, th), interpolation=cv2.INTER_LINEAR)
+
+        # resize U、V 平面到 (th//2, tw//2)
+        u_resized = cv2.resize(u_plane, (tw // 2, th // 2), interpolation=cv2.INTER_LINEAR)
+        v_resized = cv2.resize(v_plane, (tw // 2, th // 2), interpolation=cv2.INTER_LINEAR)
+
+        # 重新组装 NV12
+        nv12_out = np.empty((th * 3 // 2, tw), dtype=np.uint8)
+        nv12_out[:th, :] = y_resized
+
+        # UV 交错：把 U 和 V 重新打包成 (th//2, tw//2, 2) 再 reshape 成 (th//2, tw)
+        uv_out = np.empty((th // 2, tw // 2, 2), dtype=np.uint8)
+        uv_out[:, :, 0] = u_resized
+        uv_out[:, :, 1] = v_resized
+        nv12_out[th:, :] = uv_out.reshape(th // 2, tw)
+
+        # 记录缩放比例（用于 bbox 还原）
+        self.y_scale = h / th
+        self.x_scale = w / tw
+
+        return nv12_out
+
+    def forward(self, input_tensor: np.array) -> list:
         begin_time = time()
         quantize_outputs = self.quantize_model[0].forward(input_tensor)
-        # logger.debug("\033[1;31m" + f"forward time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
         return quantize_outputs
 
-    def c2numpy(self, outputs) -> list[np.array]:
-        begin_time = time()
+    def c2numpy(self, outputs) -> list:
         outputs = [dnnTensor.buffer for dnnTensor in outputs]
-        # logger.debug("\033[1;31m" + f"c to numpy time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
+        return outputs
+
+    def forward_nv12(self, nv12_img: np.ndarray):
+        """
+        直接接收 NV12 numpy 数组，resize 后送入模型。
+        """
+        total_rows = nv12_img.shape[0]
+        w = nv12_img.shape[1]
+        h = total_rows * 2 // 3
+
+        # 记录原始尺寸缩放比例
+        self.y_scale = h / self.model_input_height
+        self.x_scale = w / self.model_input_weight
+
+        # resize NV12 到模型输入尺寸
+        nv12_resized = self.nv12_resize(nv12_img)
+
+        # 送入模型
+        outputs = self.quantize_model[0].forward(nv12_resized)
         return outputs
 
 
@@ -85,7 +144,7 @@ class YOLOv8_Seg(BaseModel):
         super().__init__(model_file)
 
         # 根据输出形状判断是否为单类别
-        self.is_single_class = True  # 根据你的模型设置为True
+        self.is_single_class = True  # 如果是单类别模型设置为 True
 
         # 将反量化系数准备好
         self.scales = {}
@@ -94,38 +153,26 @@ class YOLOv8_Seg(BaseModel):
                 self.scales[i] = output.properties.scale_data
                 logger.info(f"output[{i}] scale shape: {output.properties.scale_data.shape}")
 
-        # 根据实际输出设置scale
-        # output0: (1,80,80,64) -> s_bboxes
         if 0 in self.scales:
             self.s_bboxes_scale = self.scales[0][np.newaxis, :]
         else:
             self.s_bboxes_scale = None
-
-        # output2: (1,80,80,32) -> s_mces
         if 2 in self.scales:
             self.s_mces_scale = self.scales[2][np.newaxis, :]
         else:
             self.s_mces_scale = None
-
-        # output3: (1,40,40,64) -> m_bboxes
         if 3 in self.scales:
             self.m_bboxes_scale = self.scales[3][np.newaxis, :]
         else:
             self.m_bboxes_scale = None
-
-        # output5: (1,40,40,32) -> m_mces
         if 5 in self.scales:
             self.m_mces_scale = self.scales[5][np.newaxis, :]
         else:
             self.m_mces_scale = None
-
-        # output6: (1,20,20,64) -> l_bboxes
         if 6 in self.scales:
             self.l_bboxes_scale = self.scales[6][np.newaxis, :]
         else:
             self.l_bboxes_scale = None
-
-        # output8: (1,20,20,32) -> l_mces
         if 8 in self.scales:
             self.l_mces_scale = self.scales[8][np.newaxis, :]
         else:
@@ -144,7 +191,6 @@ class YOLOv8_Seg(BaseModel):
         self.l_anchor = np.stack([np.tile(np.linspace(0.5, 19.5, 20), reps=20),
                                   np.repeat(np.arange(0.5, 20.5, 1), 20)], axis=0).transpose(1, 0)
 
-        # 输入图像大小, 一些阈值
         self.input_image_size = 640
         self.conf = conf
         self.iou = iou
@@ -152,70 +198,50 @@ class YOLOv8_Seg(BaseModel):
         logger.info("iou threshold = %.2f, conf threshold = %.2f" % (iou, conf))
         logger.info("sigmoid_inverse threshold = %.2f" % self.conf_inverse)
 
-        # mask 切片 corp 缩放系数
         self.x_scale_corp, self.y_scale_corp = 160 / self.model_input_height, 160 / self.model_input_weight
 
-    def postProcess(self, outputs: list[np.ndarray]) -> tuple[list]:
+    def postProcess(self, outputs: list) -> tuple:
         begin_time = time()
 
-        # 根据实际输出顺序reshape
-        # output0: (1,80,80,64) -> s_bboxes
         s_bboxes = outputs[0].reshape(-1, 64)
 
-        # output1: (1,80,80,1) -> s_clses (单类别)
         if self.is_single_class:
             s_scores_raw = outputs[1].reshape(-1)
         else:
             s_clses = outputs[1].reshape(-1, 80)
 
-        # output2: (1,80,80,32) -> s_mces
         s_mces = outputs[2].reshape(-1, 32)
-
-        # output3: (1,40,40,64) -> m_bboxes
         m_bboxes = outputs[3].reshape(-1, 64)
 
-        # output4: (1,40,40,1) -> m_clses (单类别)
         if self.is_single_class:
             m_scores_raw = outputs[4].reshape(-1)
         else:
             m_clses = outputs[4].reshape(-1, 80)
 
-        # output5: (1,40,40,32) -> m_mces
         m_mces = outputs[5].reshape(-1, 32)
-
-        # output6: (1,20,20,64) -> l_bboxes
         l_bboxes = outputs[6].reshape(-1, 64)
 
-        # output7: (1,20,20,1) -> l_clses (单类别)
         if self.is_single_class:
             l_scores_raw = outputs[7].reshape(-1)
         else:
             l_clses = outputs[7].reshape(-1, 80)
 
-        # output8: (1,20,20,32) -> l_mces
         l_mces = outputs[8].reshape(-1, 32)
-
-        # output9: (1,160,160,32) -> protos
         protos = outputs[9][0, :, :, :]
 
-        # 单类别处理逻辑
         if self.is_single_class:
-            # 阈值筛选
             s_valid_indices = np.flatnonzero(s_scores_raw >= self.conf_inverse)
             m_valid_indices = np.flatnonzero(m_scores_raw >= self.conf_inverse)
             l_valid_indices = np.flatnonzero(l_scores_raw >= self.conf_inverse)
 
-            # 单类别：所有id都是0
             s_ids = np.zeros(len(s_valid_indices), dtype=np.int32)
             m_ids = np.zeros(len(m_valid_indices), dtype=np.int32)
             l_ids = np.zeros(len(l_valid_indices), dtype=np.int32)
 
-            # Sigmoid计算
             s_scores = 1 / (1 + np.exp(-s_scores_raw[s_valid_indices]))
             m_scores = 1 / (1 + np.exp(-m_scores_raw[m_valid_indices]))
             l_scores = 1 / (1 + np.exp(-l_scores_raw[l_valid_indices]))
         else:
-            # 多类别处理逻辑（原代码）
             s_max_scores = np.max(s_clses, axis=1)
             s_valid_indices = np.flatnonzero(s_max_scores >= self.conf_inverse)
             s_ids = np.argmax(s_clses[s_valid_indices, :], axis=1)
@@ -231,12 +257,10 @@ class YOLOv8_Seg(BaseModel):
             l_ids = np.argmax(l_clses[l_valid_indices, :], axis=1)
             l_scores = l_max_scores[l_valid_indices]
 
-            # Sigmoid计算
             s_scores = 1 / (1 + np.exp(-s_scores))
             m_scores = 1 / (1 + np.exp(-m_scores))
             l_scores = 1 / (1 + np.exp(-l_scores))
 
-        # Bounding Box分支：反量化
         if self.s_bboxes_scale is not None and len(s_valid_indices) > 0:
             s_bboxes_float32 = s_bboxes[s_valid_indices, :].astype(np.float32) * self.s_bboxes_scale
         elif len(s_valid_indices) > 0:
@@ -258,12 +282,10 @@ class YOLOv8_Seg(BaseModel):
         else:
             l_bboxes_float32 = np.zeros((0, 64), dtype=np.float32)
 
-        # Bounding Box分支：dist2bbox (ltrb2xyxy)
         s_dbboxes = self._process_bboxes(s_bboxes_float32, s_valid_indices, self.s_anchor, 8)
         m_dbboxes = self._process_bboxes(m_bboxes_float32, m_valid_indices, self.m_anchor, 16)
         l_dbboxes = self._process_bboxes(l_bboxes_float32, l_valid_indices, self.l_anchor, 32)
 
-        # Mask coefficients 反量化
         if self.s_mces_scale is not None and len(s_valid_indices) > 0:
             s_mces_float32 = s_mces[s_valid_indices, :].astype(np.float32) * self.s_mces_scale
         elif len(s_valid_indices) > 0:
@@ -285,24 +307,19 @@ class YOLOv8_Seg(BaseModel):
         else:
             l_mces_float32 = np.zeros((0, 32), dtype=np.float32)
 
-        # 大中小特征层阈值筛选结果拼接
-        dbboxes = np.concatenate((s_dbboxes, m_dbboxes, l_dbboxes),
-                                 axis=0) if len(s_dbboxes) + len(m_dbboxes) + len(l_dbboxes) > 0 else np.zeros(
-            (0, 4))
-        scores = np.concatenate((s_scores, m_scores, l_scores),
-                                axis=0) if len(s_scores) + len(m_scores) + len(l_scores) > 0 else np.zeros((0,))
-        ids = np.concatenate((s_ids, m_ids, l_ids),
-                             axis=0) if len(s_ids) + len(m_ids) + len(l_ids) > 0 else np.zeros((0,), dtype=np.int32)
-        mces = np.concatenate((s_mces_float32, m_mces_float32, l_mces_float32),
-                              axis=0) if len(s_mces_float32) + len(m_mces_float32) + len(
-            l_mces_float32) > 0 else np.zeros((0, 32), dtype=np.float32)
+        dbboxes = np.concatenate((s_dbboxes, m_dbboxes, l_dbboxes), axis=0) \
+            if len(s_dbboxes) + len(m_dbboxes) + len(l_dbboxes) > 0 else np.zeros((0, 4))
+        scores = np.concatenate((s_scores, m_scores, l_scores), axis=0) \
+            if len(s_scores) + len(m_scores) + len(l_scores) > 0 else np.zeros((0,))
+        ids = np.concatenate((s_ids, m_ids, l_ids), axis=0) \
+            if len(s_ids) + len(m_ids) + len(l_ids) > 0 else np.zeros((0,), dtype=np.int32)
+        mces = np.concatenate((s_mces_float32, m_mces_float32, l_mces_float32), axis=0) \
+            if len(s_mces_float32) + len(m_mces_float32) + len(l_mces_float32) > 0 else np.zeros((0, 32), dtype=np.float32)
 
-        # nms
         if len(dbboxes) > 0:
             indices = cv2.dnn.NMSBoxes(dbboxes.tolist(), scores.tolist(), self.conf, self.iou)
             if len(indices) > 0:
                 indices = indices.flatten()
-                # 还原到原始的尺度
                 bboxes = (dbboxes[indices] * np.array(
                     [self.x_scale, self.y_scale, self.x_scale, self.y_scale])).astype(np.int32)
                 scores = scores[indices]
@@ -316,8 +333,6 @@ class YOLOv8_Seg(BaseModel):
         else:
             bboxes, scores, ids, corpes, mces = np.zeros((0, 4)), np.zeros((0,)), np.zeros(
                 (0,), dtype=np.int32), np.zeros((0, 4)), np.zeros((0, 32))
-
-        # logger.debug("\033[1;31m" + f"Post Process time = {1000 * (time() - begin_time):.2f} ms" + "\033[0m")
 
         return ids, scores, bboxes, corpes, mces, protos
 
@@ -343,17 +358,14 @@ rdk_colors = [
 
 
 def draw_detection(img: np.array,
-                   bbox: tuple[int, int, int, int],
+                   bbox: tuple,
                    score: float,
                    class_id: int,
                    colors: list = rdk_colors) -> None:
-    """
-    Draws a detection bounding box and label on the image.
-    """
     x1, y1, x2, y2 = bbox
     color = colors[class_id % len(colors)]
     cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
-    label = f"object: {score:.2f}"  # 单类别标签
+    label = f"object: {score:.2f}"
     (label_width, label_height), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
     label_x, label_y = x1, y1 - 10 if y1 - 10 > label_height else y1 + 10
     cv2.rectangle(
@@ -362,81 +374,53 @@ def draw_detection(img: np.array,
     cv2.putText(img, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
 
-def compute_and_process_mask(protos, mc, bbox, corp, 
-                           x_min_ratio=1/6, x_max_ratio=5/6,
-                           original_h=None, original_w=None):
-    """
-    计算掩码并进行处理，返回过滤后的点和最小矩形
-    
-    Args:
-        protos: 160x160的protos特征图
-        mc: mask coefficients
-        bbox: 原始图像坐标系中的边界框 (x1, y1, x2, y2)
-        corp: 160x160坐标系中的crop区域 (x1_corp, y1_corp, x2_corp, y2_corp)
-        x_min_ratio: x坐标最小比例阈值
-        x_max_ratio: x坐标最大比例阈值
-        original_h: 原始图像高度
-        original_w: 原始图像宽度
-        
-    Returns:
-        tuple: (filtered_points, box_points_original, mask_points) 或 (None, None, None)
-    """
+def compute_and_process_mask(protos, mc, bbox, corp,
+                             x_min_ratio=1/6, x_max_ratio=5/6,
+                             original_h=None, original_w=None):
     x1_corp, y1_corp, x2_corp, y2_corp = corp
     x1, y1, x2, y2 = bbox
-    
-    # 确保边界不越界
+
     x1_corp = max(0, x1_corp)
     y1_corp = max(0, y1_corp)
     x2_corp = min(160, x2_corp)
     y2_corp = min(160, y2_corp)
-    
+
     if x2_corp <= x1_corp or y2_corp <= y1_corp:
         return None, None, None
-    
-    # 计算mask（在160x160坐标系中）
+
     mask_region = protos[y1_corp:y2_corp, x1_corp:x2_corp, :]
     mask = (np.sum(mc[np.newaxis, np.newaxis, :] * mask_region, axis=2) > 0.0).astype(np.int32)
-    
-    # 获取掩码点的坐标
-    mask_points = np.argwhere(mask == 1)  # 形状为 (N, 2)，每个元素是[y, x]
-    
+
+    mask_points = np.argwhere(mask == 1)
+
     if len(mask_points) == 0:
         return None, None, None
-    
-    # 计算在160x160坐标系中的过滤阈值
-    # 注意：这里的过滤是在160x160坐标系中进行的
+
     original_width_160 = 160
     x_min_threshold = int(original_width_160 * x_min_ratio)
     x_max_threshold = int(original_width_160 * x_max_ratio)
-    
-    # 过滤点在160x160坐标系中的位置
+
     filtered_points_160 = []
     for point in mask_points:
-        y_local, x_local = point  # 在crop区域内的坐标
-        x_160 = x_local + x1_corp  # 转换到160x160坐标系
+        y_local, x_local = point
+        x_160 = x_local + x1_corp
         y_160 = y_local + y1_corp
-        
+
         if x_min_threshold <= x_160 <= x_max_threshold:
-            # 转换到原始图像坐标系
             if original_h is not None and original_w is not None:
                 x_original = int(x_160 * original_w / 160.0)
                 y_original = int(y_160 * original_h / 160.0)
             else:
-                # 使用bbox的缩放比例
                 x_original = int(x1 + x_local * (x2 - x1) / (x2_corp - x1_corp))
                 y_original = int(y1 + y_local * (y2 - y1) / (y2_corp - y1_corp))
-            
+
             filtered_points_160.append([x_original, y_original])
-    
-    # 如果有足够的点，计算最小外接矩形
+
     if len(filtered_points_160) >= 4:
         filtered_points_np = np.array(filtered_points_160, dtype=np.int32)
-        
-        # 计算最小外接矩形
         rect = cv2.minAreaRect(filtered_points_np)
-        box_points = cv2.boxPoints(rect)  # 获取矩形的四个顶点
-        box_points = np.int32(box_points)  # 转换为整数
-        
+        box_points = cv2.boxPoints(rect)
+        box_points = np.int32(box_points)
         return filtered_points_160, box_points, mask_points
-    
+
     return None, None, mask_points

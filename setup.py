@@ -19,7 +19,7 @@ setup(
          glob('launch/*.launch.py')),
         # 如果需要模型文件也一起安装
         (os.path.join('share', package_name, 'models'),
-         glob('models/*.pt')),
+         glob('models/*.bin') + glob('models/*.pt')),
         # 安装消息文件
         (os.path.join('share', package_name, 'msg'),
          glob('msg/*.msg')),

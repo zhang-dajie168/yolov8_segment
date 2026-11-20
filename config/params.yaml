@@ -1,22 +1,47 @@
 YOLOv8SegROSNode:
   ros__parameters:
-    # YOLO模型参数
-    model_path: "/home/sunrise/Ebike_Human_Follower/src/yolov8_segment/models/yolov8n_instance_seg_bayese_640x640_nv12_modified4.0.bin"
-    conf_threshold: 0.3
-    kpt_conf_threshold: 0.3
+    # ==================== 模型路径 ====================
+    model_path: "models/yolov8n_seg_person.bin"
+    reid_model_path: "models/osnet_64x128_nv12.bin"
 
-    # 处理性能参数
-    max_processing_fps: 15    
+    # ==================== 检测阈值 ====================
+    conf_threshold: 0.3
+    iou_threshold: 0.45
     
-    # ok检测参数
-    ok_confirm_frames: 10     # 连续3帧举手开始跟踪目标
+    # ==================== 处理性能与节流 ====================
+    max_processing_fps: 8.0            # 限制检测帧率为 8 FPS (0 表示不限制)
     
-    # 跟踪保护参数
+    # ==================== 统一发布频率 ====================
+    publish_fps: 10.0                  # 图像、轮廓、跟踪框统一固定 10Hz 发布
+    
+    # ==================== ReID 找回相关 ====================
+    reid_similarity_threshold: 0.73
+    height_change_threshold: 0.28
+    lost_timeout_threshold: 10.0
+    reid_try_interval: 0.5
+    reid_max_attempts: 3
+    reid_max_candidates: 2
+    reid_feature_interval: 2.0
+
+    # ==================== 跟踪与中心锁定 ====================
     tracking_protection_time: 5.0
-    
-    # ReID相关参数
-    reid_similarity_threshold: 0.73    # reid特征匹配阈值
-    height_change_threshold: 0.28  # 新增高度变化阈值 
-    lost_timeout_threshold: 10.0  # 最长丢失时间限制，超过则取消跟踪
-    reid_model_path: "/home/sunrise/Ebike_Human_Follower/src/yolov8_detect_tracking/models/osnet_64x128_nv12.bin"
-    
+    center_confirm_time: 3.0
+    center_rect_width_ratio: 0.3
+    draw_center_zone: true
+
+    # ==================== 图像与可视化 ====================
+    input_topic: "/camera_58/image_raw"
+    input_encoding: "nv12"
+    enable_visualization: true         # 开启可视化图像
+    visual_publish_width: 640
+    visual_encoding: "rgb8"
+
+    # ==================== 轮廓 / 其他 ====================
+    min_mask_points: 10
+    draw_contour_only_targets: true
+
+    # ==================== 日志 ====================
+    enable_fps_log: true
+    enable_profile_log: true
+    enable_debug_log: false
+    fps_log_interval: 2.0
