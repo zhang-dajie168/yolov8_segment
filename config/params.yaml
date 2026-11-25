@@ -7,21 +7,24 @@ YOLOv8SegROSNode:
     # ==================== 检测阈值 ====================
     conf_threshold: 0.3
     iou_threshold: 0.45
-    
+
     # ==================== 处理性能与节流 ====================
-    max_processing_fps: 8.0            # 限制检测帧率为 8 FPS (0 表示不限制)
-    
+    max_processing_fps: 10.0
+
     # ==================== 统一发布频率 ====================
-    publish_fps: 10.0                  # 图像、轮廓、跟踪框统一固定 10Hz 发布
-    
+    telemetry_publish_fps: 10.0     # 轮廓/跟踪框 10Hz
+    visual_publish_fps: 10.0        # 可视化图像 10Hz（0=每帧）
+
     # ==================== ReID 找回相关 ====================
     reid_similarity_threshold: 0.73
     height_change_threshold: 0.28
-    lost_timeout_threshold: 10.0
-    reid_try_interval: 0.5
-    reid_max_attempts: 3
-    reid_max_candidates: 2
-    reid_feature_interval: 2.0
+    lost_timeout_threshold: 5.0     # ✅ 丢失超 5 秒未找回 → 释放锁定，重新等待中心区锁定
+    reid_try_interval: 0.5          # 每 0.5s 尝试一次 ReID
+    reid_max_attempts: 3            # 每个尝试窗口 3 次
+    reid_max_candidates: 2          # 每次对比 2 个候选
+    reid_feature_interval: 2.0      # 锁定目标每 2s 更新一次特征
+    reid_retry_reset_ratio: 0.3     # ✅ reset_period = 5.0*0.3 = 1.5s，5s内可尝试6次
+    track_cleanup_age: 5.0          # ✅ 与 lost_timeout_threshold 对齐，及时清理残留记录
 
     # ==================== 跟踪与中心锁定 ====================
     tracking_protection_time: 5.0
@@ -32,7 +35,7 @@ YOLOv8SegROSNode:
     # ==================== 图像与可视化 ====================
     input_topic: "/camera_58/image_raw"
     input_encoding: "nv12"
-    enable_visualization: true         # 开启可视化图像
+    enable_visualization: true
     visual_publish_width: 640
     visual_encoding: "rgb8"
 

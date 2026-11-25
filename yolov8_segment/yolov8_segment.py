@@ -156,8 +156,8 @@ class YOLOv8SegROSNode(Node):
             'track_high_thresh': 0.25,
             'track_low_thresh': 0.1,
             'new_track_thresh': 0.25,
-            'track_buffer': 10,
-            'match_thresh': 0.68,
+            'track_buffer': 10,          # ✅ 从 10 降到 5：旧 ID 约 0.5s 内消亡，与 0.5s ReID 首试错开
+            'match_thresh': 0.68,       # ✅ 从 0.68 提到 0.75：抑制旧 ID 误复活
             'fuse_score': False,
             'gmc_method': 'sparseOptFlow',
             'proximity_thresh': 0.5,
@@ -165,6 +165,7 @@ class YOLOv8SegROSNode(Node):
             'with_reid': False,
             'reid_model_path': reid_model_path
         }
+        
         self.tracker = BOTSORT(tracker_args)
 
         self.bridge = CvBridge()
@@ -306,7 +307,8 @@ class YOLOv8SegROSNode(Node):
                 target['feature'] = self.extract_feature_from_bbox(image, bbox)
                 target['last_feature_time'] = timestamp
 
-    # ---------- 找回节流 ----------
+ 
+     # ---------- 找回节流 ----------
     def try_recover_lost_target(self, current_tracks, image, timestamp):
         if self.current_tracking_id is None or self.current_tracking_id not in self.tracked_targets:
             return None
@@ -415,6 +417,9 @@ class YOLOv8SegROSNode(Node):
                     self.tracked_persons[new_id]['first_seen_time'] = min(
                         self.tracked_persons[new_id].get('first_seen_time', timestamp),
                         old_person.get('first_seen_time', timestamp))
+            # ===== [FIX-4] 找回成功后强制清空候选字典，避免旧候选 ID 残留造成黄框叠加 =====
+            self.center_candidates.clear()
+            # ===== [FIX-4] end =====
             self.lock_fixed = True
             return new_id
         else:
@@ -649,7 +654,8 @@ class YOLOv8SegROSNode(Node):
                     display_image = self.draw_visualization(
                         bgr_for_tracker, tracking_results, mask_infos,
                         center_x, center_y, self.center_half_width, original_w, original_h,
-                        self.center_candidates, self.center_confirm_time
+                        self.center_candidates, self.center_confirm_time,
+                        lock_fixed=self.lock_fixed   # ✅ [FIX-5] 传入锁定状态
                     )
                     t_visual_draw = (time.time() - ts) * 1000.0
 
@@ -780,6 +786,163 @@ class YOLOv8SegROSNode(Node):
         self.track_box_pub.publish(polygon_msg)
 
     # ---------- 可视化：复用轮廓缓存 ----------
+    def draw_visualization(self, image, tracks, mask_infos, center_x, center_y, center_half_width,
+                           image_w, image_h, center_candidates, center_confirm_time, lock_fixed=False):
+        display = image.copy()
+        if self.draw_center_zone:
+            x1 = int(max(0, center_x - center_half_width))
+            x2 = int(min(image_w - 1, center_x + center_half_width))
+            y1 = 0
+            y2 = int(image_h - 1)
+
+            overlay = display.copy()
+            light_yellow = (150, 255, 255)
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), light_yellow, -1)
+            cv2.addWeighted(overlay, 0.12, display, 0.88, 0, display)
+
+            border_color = (120, 230, 255)
+            cv2.rectangle(display, (x1, y1), (x2, y2), border_color, 1)
+            cv2.line(display, (int(center_x), y1), (int(center_x), y2), (100, 100, 240), 1)
+            cv2.putText(display, "Center Zone", (x1 + 5, 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, border_color, 1)
+
+        if self.draw_contour_only_targets:
+            keep_det_idx = set()
+            if self.current_tracking_id is not None:
+                for track in tracks:
+                    if int(track[4]) == self.current_tracking_id:
+                        det_idx = track[7]
+                        if det_idx != -1:
+                            keep_det_idx.add(det_idx)
+                        break
+            for track in tracks:
+                tid = int(track[4])
+                if tid in center_candidates:
+                    det_idx = track[7]
+                    if det_idx != -1:
+                        keep_det_idx.add(det_idx)
+        else:
+            keep_det_idx = set(range(len(mask_infos)))
+
+        for det_idx, (mc, corp, protos, bbox) in enumerate(mask_infos):
+            if det_idx not in keep_det_idx:
+                continue
+            contour = self._frame_contours.get(det_idx)
+            if contour is None:
+                contour = self.extract_contour(mc, corp, protos, image.shape[0], image.shape[1])
+                if contour is not None:
+                    self._frame_contours[det_idx] = contour
+            if contour is not None and len(contour) > 0:
+                try:
+                    cv2.polylines(display, [contour], True, (0, 255, 0), 1)
+                except cv2.error:
+                    pass
+
+        # ===== [FIX-5] 先收集所有待画框，做同物理目标去重（IoU 抑制），再统一绘制 =====
+        draw_items = []   # 每项: (x1, y1, x2, y2, track_id, is_tracking, is_candidate)
+        for track in tracks:
+            x, y, w, h, track_id, score, cls, det_idx = track
+            track_id = int(track_id)
+            if det_idx != -1 and det_idx < len(mask_infos):
+                _, _, _, bbox = mask_infos[det_idx]
+                x1, y1, x2, y2 = bbox
+            else:
+                x1, y1, x2, y2 = int(x), int(y), int(x + w), int(y + h)
+
+            is_tracking = (track_id == self.current_tracking_id)
+            # ✅ 锁定已固定后，不再把任何 ID 视为候选（黄框只在未锁定阶段出现）
+            is_candidate = (not lock_fixed) and (not is_tracking) and (track_id in center_candidates)
+            draw_items.append((int(x1), int(y1), int(x2), int(y2), track_id, is_tracking, is_candidate))
+
+        # 排序优先级：锁定目标 > 候选 > 普通；确保去重时锁定目标永远保留
+        draw_items.sort(key=lambda it: (0 if it[5] else (1 if it[6] else 2)))
+
+        kept_boxes = []   # 已保留框，用于 IoU 去重
+
+        def _iou(a, b):
+            ax1, ay1, ax2, ay2 = a[:4]
+            bx1, by1, bx2, by2 = b[:4]
+            ix1 = max(ax1, bx1); iy1 = max(ay1, by1)
+            ix2 = min(ax2, bx2); iy2 = min(ay2, by2)
+            iw = max(0, ix2 - ix1); ih = max(0, iy2 - iy1)
+            inter = iw * ih
+            if inter <= 0:
+                return 0.0
+            area_a = max(1, (ax2 - ax1) * (ay2 - ay1))
+            area_b = max(1, (bx2 - bx1) * (by2 - by1))
+            return inter / float(area_a + area_b - inter + 1e-8)
+
+        # IoU 阈值：0.5 以上认为是同一物理目标，抑制低优先级框
+        for item in draw_items:
+            x1, y1, x2, y2, track_id, is_tracking, is_candidate = item
+            dup = False
+            for kept in kept_boxes:
+                if _iou(item, kept) > 0.5:
+                    dup = True
+                    break
+            if dup:
+                continue
+            kept_boxes.append(item)
+
+            color = (0, 0, 255) if is_tracking else (255, 0, 0)
+            if is_candidate:
+                elapsed = time.time() - center_candidates[track_id]
+                remaining = max(0, center_confirm_time - elapsed)
+                color = (0, 255, 255)
+                cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(display, f"Candidate {elapsed:.1f}s", (x1, y1 - 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                cv2.putText(display, f"Remain {remaining:.1f}s", (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+            else:
+                cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
+                cv2.putText(display, f"ID:{track_id}", (x1, y1 - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        # ===== [FIX-5] end =====
+        return display
+
+    def _cleanup_old_tracks(self, current_time, current_track_ids):
+        # ===== [FIX-3] 清理年龄参数化 =====
+        max_track_age = self.track_cleanup_age
+        # ===== [FIX-6] 锁定固定后，清除非锁定目标的候选记录（避免黄框残留） =====
+        if self.lock_fixed:
+            for cid in list(self.center_candidates.keys()):
+                if cid != self.current_tracking_id:
+                    del self.center_candidates[cid]
+        # ===== [FIX-6] end =====
+        for track_id in list(self.tracked_persons.keys()):
+            if track_id == self.current_tracking_id:
+                continue
+            if track_id not in current_track_ids:
+                last_seen = self.tracked_persons[track_id]['last_seen_time']
+                if current_time - last_seen > max_track_age:
+                    del self.tracked_persons[track_id]
+                    if track_id in self.tracked_targets:
+                        del self.tracked_targets[track_id]
+                    if track_id in self.center_candidates:
+                        del self.center_candidates[track_id]
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    try:
+        node = YOLOv8SegROSNode()
+        
+        executor = SingleThreadedExecutor()
+        executor.add_node(node)
+        try:
+            executor.spin()
+        finally:
+            executor.shutdown()
+            node.destroy_node()
+    except Exception as e:
+        print(f"Node initialization failed: {e}")
+    finally:
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
     def draw_visualization(self, image, tracks, mask_infos, center_x, center_y, center_half_width,
                            image_w, image_h, center_candidates, center_confirm_time):
         display = image.copy()

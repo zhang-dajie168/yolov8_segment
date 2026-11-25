@@ -3,22 +3,16 @@
 colcon build --packages-select yolov8_segment
 
 # 2. run
-
-#!/bin/bash
-# start_pose_track_launch.sh
-
-export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 source install/setup.bash
 
 ros2 launch yolov8_segment yolov8_segment.launch.py 
 
  
  
- 
 # 3. echo
 
-ros2 topic echo /seg_track/contours    ## 检测目标轮廓
-ros2 topic echo /seg_track/track_box   ## 检测目标box矩形框
+ros2 topic echo /segmentation/rectangles
+
 
 # 4.result
 
